@@ -17,14 +17,15 @@ import torch
 from torch import Tensor
 
 from torchmetrics.functional.classification.auroc import _auroc_compute, _auroc_update
-from torchmetrics.metric import Metric
+from torchmetrics.classification.confusion_matrix import ConfusionMatrix
 from torchmetrics.utilities import rank_zero_warn
+from torchmetrics.utilities.checks import _input_format_classification
 from torchmetrics.utilities.data import dim_zero_cat
 from torchmetrics.utilities.enums import DataType
 from torchmetrics.utilities.imports import _TORCH_LOWER_1_6
 
 
-class AUROC(Metric):
+class AUROC(ConfusionMatrix):
     r"""Compute Area Under the Receiver Operating Characteristic Curve (`ROC AUC`_).
     Works for both binary, multilabel and multiclass problems. In the case of
     multiclass, the values will be calculated based on a one-vs-the-rest approach.
@@ -118,20 +119,30 @@ class AUROC(Metric):
         max_fpr: Optional[float] = None,
         compute_on_step: bool = True,
         dist_sync_on_step: bool = False,
+        reduce_memory: bool = False,
         process_group: Optional[Any] = None,
         dist_sync_fn: Callable = None,
+        max_threshold_count = 100,
+        num_batches_to_sample = 4,
     ) -> None:
         super().__init__(
             compute_on_step=compute_on_step,
             dist_sync_on_step=dist_sync_on_step,
             process_group=process_group,
             dist_sync_fn=dist_sync_fn,
+            num_classes=num_classes,
+            threshold=[None]*max_threshold_count,
+            multilabel=True,
         )
 
         self.num_classes = num_classes
         self.pos_label = pos_label
         self.average = average
         self.max_fpr = max_fpr
+        self.reduce_memory = reduce_memory
+        self.max_threshold_count = max_threshold_count
+        self.num_batches_to_sample = num_batches_to_sample
+        self.confusion_matrices = None
 
         allowed_average = (None, "macro", "weighted", "micro")
         if self.average not in allowed_average:
@@ -149,13 +160,25 @@ class AUROC(Metric):
                 )
 
         self.mode: DataType = None  # type: ignore
+
         self.add_state("preds", default=[], dist_reduce_fx="cat")
         self.add_state("target", default=[], dist_reduce_fx="cat")
 
-        rank_zero_warn(
-            "Metric `AUROC` will save all targets and predictions in buffer."
-            " For large datasets this may lead to large memory footprint."
-        )
+        if not self.reduce_memory:
+            rank_zero_warn(
+                "Metric `AUROC` will save all targets and predictions in buffer."
+                " For large datasets this may lead to large memory footprint."
+            )
+
+    def _furthest_values(self, input_values, max_count):
+        sorted_values = input_values.sort(dim=0, descending=True).values
+        indices = (sorted_values - sorted_values.roll(-1, dims=[0]))[:-1].sort(dim=0, descending=True).indices[:((max_count - 2) // 2)]
+        output_indices = torch.cat([
+        indices,
+            indices + 1,
+            torch.tensor([0, sorted_values.shape[0] - 1]).unsqueeze(1).tile([1, indices.shape[1]])
+        ], dim=0)
+        return torch.gather(sorted_values.permute(1, 0), 1, output_indices.permute(1, 0)).permute(1, 0)
 
     def update(self, preds: Tensor, target: Tensor) -> None:  # type: ignore
         """Update state with predictions and targets.
@@ -164,17 +187,29 @@ class AUROC(Metric):
             preds: Predictions from model (probabilities, or labels)
             target: Ground truth labels
         """
-        preds, target, mode = _auroc_update(preds, target)
 
-        self.preds.append(preds)
-        self.target.append(target)
-
-        if self.mode and self.mode != mode:
-            raise ValueError(
-                "The mode of data (binary, multi-label, multi-class) should be constant, but changed"
-                f" between batches from {self.mode} to {mode}"
-            )
-        self.mode = mode
+        if self.reduce_memory:
+            if len(self.preds) < (self.num_batches_to_sample - 1):
+                # Collect sample data to use to select thresholds
+                self.preds.append(preds)
+                self.target.append(target)
+                _, _, self.mode = _input_format_classification(preds, target)
+            elif not isinstance(self.threshold, torch.Tensor) or len(self.threshold) == 0:
+                # Select thresholds from the sample
+                self.threshold = self._furthest_values(torch.cat(self.preds + [preds]), self.max_threshold_count)
+                super().update(torch.cat(self.preds + [preds]), torch.cat(self.target + [target]))
+            else:
+                super().update(preds, target)
+        else:
+            preds, target, mode = _auroc_update(preds, target)
+            self.preds.append(preds)
+            self.target.append(target)
+            if self.mode and self.mode != mode:
+                raise ValueError(
+                    "The mode of data (binary, multi-label, multi-class) should be constant, but changed"
+                    f" between batches from {self.mode} to {mode}"
+                )
+            self.mode = mode
 
     def compute(self) -> Tensor:
         """Computes AUROC based on inputs passed in to ``update`` previously."""
@@ -182,12 +217,32 @@ class AUROC(Metric):
             raise RuntimeError("You have to have determined mode.")
         preds = dim_zero_cat(self.preds)
         target = dim_zero_cat(self.target)
+        if self.reduce_memory:
+            self.confusion_matrices = super().compute()
+            self.threshold, indices = self.threshold.sort(dim=0, descending=True)
+            indices = indices.unsqueeze(2).unsqueeze(2).tile([1, 1, 2, 2])
+            self.confusion_matrices = torch.gather(
+                self.confusion_matrices.permute(1, 0, 2, 3),
+                1,
+                indices.permute(1, 0, 2, 3),
+            ).permute(1, 0, 2, 3)
+            fps = self.confusion_matrices[:, :, 0, 1]
+            tps = self.confusion_matrices[:, :, 1, 1]
+            thresholds = self.threshold
+        else:
+            fps = None
+            tps = None
+            thresholds = None
         return _auroc_compute(
-            preds,
-            target,
-            self.mode,
-            self.num_classes,
-            self.pos_label,
-            self.average,
-            self.max_fpr,
+            preds=preds,
+            target=target,
+            mode=self.mode,
+            num_classes=self.num_classes,
+            pos_label=self.pos_label,
+            average=self.average,
+            max_fpr=self.max_fpr,
+            sample_weights=None,
+            fps=fps,
+            tps=tps,
+            thresholds=thresholds
         )

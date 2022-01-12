@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 from torch import Tensor
@@ -22,7 +22,7 @@ from torchmetrics.utilities.enums import DataType
 
 
 def _confusion_matrix_update(
-    preds: Tensor, target: Tensor, num_classes: int, threshold: float = 0.5, multilabel: bool = False
+    preds: Tensor, target: Tensor, num_classes: int, threshold: Union[float, Tensor, list] = 0.5, multilabel: bool = False
 ) -> Tensor:
     """Updates and returns confusion matrix (without any normalization) based on the mode of the input.
 
@@ -33,23 +33,30 @@ def _confusion_matrix_update(
             case of binary or multi-label inputs. Default value of 0.5 corresponds to input being probabilities.
         multilabel: determines if data is multilabel or not.
     """
+    input_threshold, input_preds, input_target = threshold, preds, target
+    thresholds = threshold if isinstance(threshold, (list, Tensor)) else [threshold]
 
-    preds, target, mode = _input_format_classification(preds, target, threshold)
-    if mode not in (DataType.BINARY, DataType.MULTILABEL):
-        preds = preds.argmax(dim=1)
-        target = target.argmax(dim=1)
-    if multilabel:
-        unique_mapping = ((2 * target + preds) + 4 * torch.arange(num_classes, device=preds.device)).flatten()
-        minlength = 4 * num_classes
-    else:
-        unique_mapping = (target.view(-1) * num_classes + preds.view(-1)).to(torch.long)
-        minlength = num_classes ** 2
-
-    bins = torch.bincount(unique_mapping, minlength=minlength)
-    if multilabel:
-        confmat = bins.reshape(num_classes, 2, 2)
-    else:
-        confmat = bins.reshape(num_classes, num_classes)
+    confmat_list = []
+    for threshold in thresholds:
+        preds, target, mode = _input_format_classification(input_preds, input_target, threshold)
+        if mode not in (DataType.BINARY, DataType.MULTILABEL):
+            preds = preds.argmax(dim=1)
+            target = target.argmax(dim=1)
+        if multilabel:
+            unique_mapping = ((2 * target + preds) + 4 * torch.arange(num_classes, device=preds.device)).flatten()
+            minlength = 4 * num_classes
+        else:
+            unique_mapping = (target.view(-1) * num_classes + preds.view(-1)).to(torch.long)
+            minlength = num_classes ** 2
+        bins = torch.bincount(unique_mapping, minlength=minlength)
+        if multilabel:
+            confmat_list.append(bins.reshape(num_classes, 2, 2))
+        else:
+            confmat_list.append(bins.reshape(num_classes, num_classes))
+    confmat = torch.stack(confmat_list)
+    # If a single threshold is provided, return the confusion matrix without the thresholds dimension
+    if isinstance(input_threshold, float):
+        confmat = confmat.squeeze(dim=0)
     return confmat
 
 

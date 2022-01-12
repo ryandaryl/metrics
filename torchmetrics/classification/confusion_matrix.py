@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import torch
 from torch import Tensor
@@ -98,16 +98,18 @@ class ConfusionMatrix(Metric):
         self,
         num_classes: int,
         normalize: Optional[str] = None,
-        threshold: float = 0.5,
+        threshold: Union[float, Tensor, list] = 0.5,
         multilabel: bool = False,
         compute_on_step: bool = True,
         dist_sync_on_step: bool = False,
         process_group: Optional[Any] = None,
+        **kwargs,
     ) -> None:
         super().__init__(
             compute_on_step=compute_on_step,
             dist_sync_on_step=dist_sync_on_step,
             process_group=process_group,
+            **kwargs,
         )
         self.num_classes = num_classes
         self.normalize = normalize
@@ -118,7 +120,12 @@ class ConfusionMatrix(Metric):
         if self.normalize not in allowed_normalize:
             raise ValueError(f"Argument average needs to one of the following: {allowed_normalize}")
 
-        default = torch.zeros(num_classes, 2, 2) if multilabel else torch.zeros(num_classes, num_classes)
+        num_thresholds = len(threshold) if isinstance(threshold, (list, Tensor)) else 1
+        default = (torch.zeros(num_thresholds, num_classes, 2, 2) if multilabel
+            else torch.zeros(num_thresholds, num_classes, num_classes))
+        # If a single float threshold is provided, initialise the confusion matrix without the thresholds dimension
+        if isinstance(threshold, float):
+            default = default.squeeze(dim=0)
         self.add_state("confmat", default=default, dist_reduce_fx="sum")
 
     def update(self, preds: Tensor, target: Tensor) -> None:  # type: ignore

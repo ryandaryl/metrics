@@ -50,6 +50,9 @@ def _roc_compute_single_class(
     target: Tensor,
     pos_label: int,
     sample_weights: Optional[Sequence] = None,
+    fps: Optional[Tensor] = None,
+    tps: Optional[Tensor] = None,
+    thresholds: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     """Computes Receiver Operating Characteristic for single class inputs. Returns tensor with false positive
     rates, tensor with true positive rates, tensor with thresholds used for computing false- and true postive
@@ -65,9 +68,10 @@ def _roc_compute_single_class(
         sample_weights: sample weights for each data point
     """
 
-    fps, tps, thresholds = _binary_clf_curve(
-        preds=preds, target=target, sample_weights=sample_weights, pos_label=pos_label
-    )
+    if fps == None or tps == None or thresholds == None:
+        fps, tps, thresholds = _binary_clf_curve(
+            preds=preds, target=target, sample_weights=sample_weights, pos_label=pos_label
+        )
     # Add an extra threshold position to make sure that the curve starts at (0, 0)
     tps = torch.cat([torch.zeros(1, dtype=tps.dtype, device=tps.device), tps])
     fps = torch.cat([torch.zeros(1, dtype=fps.dtype, device=fps.device), fps])
@@ -101,6 +105,9 @@ def _roc_compute_multi_class(
     target: Tensor,
     num_classes: int,
     sample_weights: Optional[Sequence] = None,
+    fps: Optional[Tensor] = None,
+    tps: Optional[Tensor] = None,
+    thresholds: Optional[Tensor] = None,
 ) -> Tuple[List[Tensor], List[Tensor], List[Tensor]]:
     """Computes Receiver Operating Characteristic for multi class inputs. Returns tensor with false positive rates,
     tensor with true positive rates, tensor with thresholds used for computing false- and true postive rates.
@@ -129,6 +136,9 @@ def _roc_compute_multi_class(
             num_classes=1,
             pos_label=pos_label,
             sample_weights=sample_weights,
+            fps=fps[:, cls],
+            tps=tps[:, cls],
+            thresholds=thresholds[:, cls],
         )
         fpr.append(res[0])
         tpr.append(res[1])
@@ -143,6 +153,9 @@ def _roc_compute(
     num_classes: int,
     pos_label: Optional[int] = None,
     sample_weights: Optional[Sequence] = None,
+    fps: Optional[Tensor] = None,
+    tps: Optional[Tensor] = None,
+    thresholds: Optional[Tensor] = None,
 ) -> Union[Tuple[Tensor, Tensor, Tensor], Tuple[List[Tensor], List[Tensor], List[Tensor]]]:
     """Computes Receiver Operating Characteristic based on the number of classes.
 
@@ -195,8 +208,8 @@ def _roc_compute(
         if num_classes == 1 and preds.ndim == 1:  # binary
             if pos_label is None:
                 pos_label = 1
-            return _roc_compute_single_class(preds, target, pos_label, sample_weights)
-        return _roc_compute_multi_class(preds, target, num_classes, sample_weights)
+            return _roc_compute_single_class(preds, target, pos_label, sample_weights, fps, tps, thresholds)
+        return _roc_compute_multi_class(preds, target, num_classes, sample_weights, fps, tps, thresholds)
 
 
 def roc(
@@ -205,6 +218,9 @@ def roc(
     num_classes: Optional[int] = None,
     pos_label: Optional[int] = None,
     sample_weights: Optional[Sequence] = None,
+    fps: Optional[Tensor] = None,
+    tps: Optional[Tensor] = None,
+    thresholds: Optional[Tensor] = None,
 ) -> Union[Tuple[Tensor, Tensor, Tensor], Tuple[List[Tensor], List[Tensor], List[Tensor]]]:
     """Computes the Receiver Operating Characteristic (ROC). Works with both binary, multiclass and multilabel
     input.
@@ -288,4 +304,4 @@ def roc(
          tensor([1.1837, 0.1837, 0.1338, 0.1183, 0.1138])]
     """
     preds, target, num_classes, pos_label = _roc_update(preds, target, num_classes, pos_label)
-    return _roc_compute(preds, target, num_classes, pos_label, sample_weights)
+    return _roc_compute(preds, target, num_classes, pos_label, sample_weights, fps, tps, thresholds)
