@@ -57,6 +57,9 @@ def _auroc_compute(
     average: Optional[str] = "macro",
     max_fpr: Optional[float] = None,
     sample_weights: Optional[Sequence] = None,
+    fps: Optional[Tensor] = None,
+    tps: Optional[Tensor] = None,
+    thresholds: Optional[Tensor] = None,
 ) -> Tensor:
     """Computes Area Under the Receiver Operating Characteristic Curve.
 
@@ -118,11 +121,28 @@ def _auroc_compute(
     # calculate fpr, tpr
     if mode == DataType.MULTILABEL:
         if average == AverageMethod.MICRO:
-            fpr, tpr, _ = roc(preds.flatten(), target.flatten(), 1, pos_label, sample_weights)
+            fpr, tpr, _ = roc(
+                preds.flatten(),
+                target.flatten(),
+                num_classes=1,
+                pos_label=pos_label,
+                sample_weights=sample_weights,
+                fps=fps,
+                tps=tps,
+                thresholds=thresholds)
         elif num_classes:
             # for multilabel we iteratively evaluate roc in a binary fashion
             output = [
-                roc(preds[:, i], target[:, i], num_classes=1, pos_label=1, sample_weights=sample_weights)
+                roc(
+                    preds[:, i],
+                    target[:, i],
+                    num_classes=1,
+                    pos_label=1,
+                    sample_weights=sample_weights,
+                    fps=fps[:, i] if fps != None else fps,
+                    tps=tps[:, i] if tps != None else tps,
+                    thresholds=thresholds[:, i] if thresholds != None else thresholds,
+                )
                 for i in range(num_classes)
             ]
             fpr = [o[0] for o in output]
@@ -147,7 +167,7 @@ def _auroc_compute(
                 num_classes = class_observed.sum()
                 if num_classes == 1:
                     raise ValueError("Found 1 non-empty class in `multiclass` AUROC calculation")
-        fpr, tpr, _ = roc(preds, target, num_classes, pos_label, sample_weights)
+        fpr, tpr, _ = roc(preds, target, num_classes, pos_label, sample_weights, fps, tps, thresholds)
 
     # calculate standard roc auc score
     if max_fpr is None or max_fpr == 1:
